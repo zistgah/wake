@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polished RT Voice Paddle</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: auto; background: #121212; color: #f0f0f0; }
+    .panel { background: #1e1e1e; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #333; }
+    .setting-row { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+    select, input[type="text"] { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #111; color: #fff; width: 60%; }
+    button { padding: 10px 18px; font-size: 1rem; margin-right: 8px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
+    button:disabled { background: #555; color: #999; cursor: not-allowed; }
+    
+    #displayArea { background: #1a1a1a; border: 2px solid #444; border-radius: 8px; position: relative; overflow: hidden; margin-bottom: 15px; text-align: center; }
+    canvas { background: #000; border-radius: 4px; display: block; margin: 0 auto; }
+    
+    .scoreboard { display: flex; justify-content: space-between; padding: 0 10px 10px 10px; font-weight: bold; font-family: monospace; color: #00ff66; }
+
+    #log { background: #000; border: 1px solid #333; padding: 10px; height: 120px; overflow-y: auto; font-family: monospace; font-size: 0.9em; border-radius: 4px; }
+    .ack { color: #00ff66; font-weight: bold; }
+    .sys { color: #888; font-size: 0.8em; }
+  </style>
+</head>
+<body>
+
+  <h2>Polished RT Voice Paddle</h2>
+
+  <div class="panel">
+    <div class="setting-row">
+      <label>Language:</label>
+      <select id="langSelect">
+        <option value="en-US">English</option>
+        <option value="hi-IN">Hindi</option>
+      </select>
+    </div>
+    <div class="setting-row">
+      <label><input type="checkbox" id="useWakeWord"> Use Wake Word</label>
+    </div>
+    <div class="setting-row">
+      <label>Wake Phrase:</label>
+      <input type="text" id="wakeWordInput" value="computer">
+    </div>
+  </div>
+
+  <div id="displayArea">
+    <div class="scoreboard">
+      <span>SCORE: <span id="scoreVal">0</span></span>
+      <span>BALLS: <span id="livesVal">3</span></span>
+    </div>
+    <canvas id="pongCanvas" width="400" height="200"></canvas>
+  </div>
+
+  <div style="margin-bottom: 15px;">
+    <button id="startBtn">Start Game</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div id="log">System Ready... Say "left" or "right".</div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const logEl = document.getElementById('log');
+    const langSelect = document.getElementById('langSelect');
+    const useWakeWordCb = document.getElementById('useWakeWord');
+    const wakeWordInput = document.getElementById('wakeWordInput');
+    const pongCanvas = document.getElementById('pongCanvas');
+    const ctx = pongCanvas.getContext('2d');
+    const scoreValEl = document.getElementById('scoreVal');
+    const livesValEl = document.getElementById('livesVal');
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) alert("Speech Recognition not supported.");
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+
+    let isRunning = false;
+    let rollingBuffer = "";
+    
+    // GAME THREAD VARIABLES
+    let paddleX = 165;
+    let targetPaddleX = 165; // Target position for smooth interpolation
+    let commandQueue = [];   // Stack array to prevent dropped commands during rapid speech
+    
+    let ballX = 200, ballY = 100, ballDx = 2.5, ballDy = -2.5;
+    let score = 0;
+    let lives = 3;
+    let gameInterval = null;
+
+    function logMessage(msg, type = 'sys') {
+      const entry = document.createElement('div');
+      entry.className = type;
+      entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function normalizeText(text) {
+      return text.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9\u0900-\u097F\s]/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    function handleSpeechInput(text) {
+      logMessage(`[Heard]: "${text}"`, 'ack');
+
+      const leftMatches = (text.match(/left|बाएं/g) || []).length;
+      const rightMatches = (text.match(/right|दाएं/g) || []).length;
+
+      for (let i = 0; i < leftMatches; i++) commandQueue.push(-1);
+      for (let i = 0; i < rightMatches; i++) commandQueue.push(1);
+    }
+
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript.trim();
+      if (!transcript) return;
+
+      if (!useWakeWordCb.checked) {
+        handleSpeechInput(transcript);
+      } else {
+        rollingBuffer += " " + transcript;
+        const cleanBuffer = normalizeText(rollingBuffer);
+        const target = normalizeText(wakeWordInput.value);
+
+        if (cleanBuffer.includes(target) && target.length > 0) {
+          const parts = cleanBuffer.split(target);
+          const command = parts[parts.length - 1].trim();
+          if (command) {
+            handleSpeechInput(command);
+          }
+        }
+        if (rollingBuffer.length > 150) rollingBuffer = rollingBuffer.slice(-150);
+      }
+    };
+
+    recognition.onend = () => {
+      if (isRunning) {
+        try { recognition.start(); } catch(e) {}
+      }
+    };
+
+    recognition.onerror = () => {
+      if (isRunning) {
+        try { recognition.start(); } catch(e) {}
+      }
+    };
+
+    // INDEPENDENT GAME THREAD (60 FPS loop with smooth sliding & queue consumption)
+    function startGameLoop() {
+      if (gameInterval) return;
+      gameInterval = setInterval(() => {
+        ctx.clearRect(0, 0, pongCanvas.width, pongCanvas.height);
+        
+        // Consume command stack sequentially
+        while (commandQueue.length > 0) {
+          const dir = commandQueue.shift();
+          targetPaddleX += dir * 35; // Step multiplier per recognized direction word
+        }
+
+        // Clamp target bounds (Paddle width is 70, canvas is 400 -> max X is 330)
+        targetPaddleX = Math.max(0, Math.min(330, targetPaddleX));
+
+        // Smoothly glide paddle towards target (Linear Interpolation / easing)
+        paddleX += (targetPaddleX - paddleX) * 0.3;
+
+        // Draw Paddle
+        ctx.fillStyle = "#00ff66";
+        ctx.fillRect(paddleX, 185, 70, 10);
+
+        // Move Ball
+        ballX += ballDx;
+        ballY += ballDy;
+        if (ballX < 5 || ballX > 395) ballDx = -ballDx;
+        if (ballY < 5) ballDy = -ballDy;
+
+        // Paddle Collision
+        if (ballY >= 175 && ballX >= paddleX && ballX <= paddleX + 70) {
+          ballDy = -ballDy;
+          score += 10;
+          scoreValEl.textContent = score;
+        }
+
+        // Miss / Reset Ball
+        if (ballY > 205) {
+          lives--;
+          livesValEl.textContent = lives;
+          if (lives <= 0) {
+            stopGameLoop();
+            isRunning = false;
+            recognition.stop();
+            logMessage("Game Over! Final Score: " + score, "sys");
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            return;
+          }
+          ballX = 200;
+          ballY = 100;
+          ballDy = -2.5;
+        }
+
+        // Draw Ball
+        ctx.beginPath();
+        ctx.arc(ballX, ballY, 6, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffaa00";
+        ctx.fill();
+        ctx.closePath();
+      }, 1000 / 30);
+    }
+
+    function stopGameLoop() {
+      clearInterval(gameInterval);
+      gameInterval = null;
+    }
+
+    startBtn.onclick = () => {
+      isRunning = true;
+      rollingBuffer = "";
+      commandQueue = [];
+      score = 0;
+      lives = 3;
+      scoreValEl.textContent = score;
+      livesValEl.textContent = lives;
+      paddleX = 165;
+      targetPaddleX = 165;
+      
+      recognition.lang = langSelect.value;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      startGameLoop();
+      
+      try { recognition.start(); } catch(e) {}
+      logMessage("Game started! Speak 'left' or 'right'.", "sys");
+    };
+
+    stopBtn.onclick = () => {
+      isRunning = false;
+      recognition.stop();
+      stopGameLoop();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      logMessage("Game stopped.", "sys");
+    };
+  </script>
+</body>
+</html>
+
