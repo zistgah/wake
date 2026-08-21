@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Assistant with Talk-Back</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: auto; background: #1a1a1a; color: #f0f0f0; }
+    .panel { background: #2a2a2a; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #444; }
+    .setting-row { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+    input[type="text"], select { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #111; color: #fff; width: 60%; }
+    button { padding: 12px 20px; font-size: 1rem; margin-right: 8px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
+    button:disabled { background: #555; color: #999; cursor: not-allowed; }
+    #log { background: #111; border: 1px solid #333; padding: 12px; height: 350px; overflow-y: auto; font-family: monospace; border-radius: 4px; }
+    .interim { color: #888; font-style: italic; }
+    .final { color: #00ff66; }
+    .ack { color: #000; font-weight: bold; background: #00ff66; padding: 4px; margin-top: 4px; display: inline-block; border-radius: 3px; }
+    .tts { color: #000; font-weight: bold; background: #00bfff; padding: 4px; margin-top: 4px; display: inline-block; border-radius: 3px; }
+    .sys { color: #ffaa00; font-size: 0.8em; }
+  </style>
+</head>
+<body>
+
+  <h2>Voice Assistant Interface</h2>
+
+  <div class="panel">
+    <div class="setting-row">
+      <label>Language:</label>
+      <select id="langSelect">
+        <option value="en-US">English (US)</option>
+        <option value="en-IN">English (India)</option>
+        <option value="hi-IN">Hindi (India)</option>
+      </select>
+    </div>
+    
+    <div class="setting-row">
+      <label>
+        <input type="checkbox" id="useWakeWord" checked> Use Wake Word
+      </label>
+    </div>
+    
+    <div class="setting-row" id="wakeWordRow">
+      <label>Wake Phrase:</label>
+      <input type="text" id="wakeWordInput" value="computer it's for you">
+    </div>
+  </div>
+
+  <div style="margin-bottom: 15px;">
+    <button id="startBtn">Start System</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div id="log">System Ready...</div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const logEl = document.getElementById('log');
+    const useWakeWordCb = document.getElementById('useWakeWord');
+    const wakeWordInput = document.getElementById('wakeWordInput');
+    const langSelect = document.getElementById('langSelect');
+    const wakeWordRow = document.getElementById('wakeWordRow');
+
+    // Toggle wake word input visibility
+    useWakeWordCb.onchange = () => {
+      wakeWordRow.style.display = useWakeWordCb.checked ? 'flex' : 'none';
+    };
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const synth = window.speechSynthesis;
+
+    if (!SpeechRecognition || !synth) {
+      alert("Web Speech API or Speech Synthesis not supported in this browser.");
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    let isSystemActive = false;
+    let isSpeaking = false; // CRITICAL: prevents mic from hearing its own TTS
+    let interimDiv = null;
+    let rollingBuffer = "";
+
+    function logMessage(msg, type = 'sys') {
+      const entry = document.createElement('div');
+      entry.className = type;
+      entry.innerHTML = msg;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // Normalizer to make matching robust (removes punctuation, makes lowercase)
+    function normalizeText(text) {
+      return text.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    // Text-to-Speech Function
+    function speakOutLoud(text) {
+      if (text.trim() === "") return;
+      
+      logMessage(`[Speaking]: "${text}"`, 'tts');
+      
+      isSpeaking = true;
+      recognition.stop(); // 1. Kill mic so it doesn't listen to itself
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = langSelect.value;
+      
+      utterance.onend = () => {
+        isSpeaking = false;
+        // 2. Restart mic immediately after speaking finishes
+        if (isSystemActive) {
+          try { recognition.start(); } catch(e) {}
+        }
+      };
+      
+      utterance.onerror = (e) => {
+        logMessage(`[TTS Error]: ${e.error}`, 'sys');
+        isSpeaking = false;
+        if (isSystemActive) { try { recognition.start(); } catch(e) {} }
+      };
+
+      synth.speak(utterance);
+    }
+
+    function processCommand(commandText) {
+       logMessage(`[Command Extracted]: "${commandText}"`, 'ack');
+       // For now, just echo the command back
+       speakOutLoud(`I heard you say: ${commandText}`);
+       rollingBuffer = ""; // Clear buffer after action
+    }
+
+    recognition.onstart = () => logMessage("[System] Microphone listening...", "sys");
+
+    recognition.onresult = (event) => {
+      if (isSpeaking) return; // Ignore any weird buffered audio while talking
+
+      let interimTranscript = '';
+      let finalTranscript = '';
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const chunk = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscript += chunk;
+        } else {
+          interimTranscript += chunk;
+        }
+      }
+
+      // Handle live typing text
+      if (interimTranscript) {
+        if (!interimDiv) {
+          interimDiv = document.createElement('div');
+          interimDiv.className = 'interim';
+          logEl.appendChild(interimDiv);
+        }
+        interimDiv.textContent = `[Hearing...] ${interimTranscript}`;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      // Handle finalized chunk
+      if (finalTranscript) {
+        if (interimDiv) { interimDiv.remove(); interimDiv = null; }
+        
+        logMessage(`[Heard]: "${finalTranscript.trim()}"`, 'final');
+
+        if (!useWakeWordCb.checked) {
+          // MODE 1: No Wake Word. Every final sentence is a command.
+          processCommand(finalTranscript.trim());
+        } else {
+          // MODE 2: Wake Word Required.
+          rollingBuffer += " " + finalTranscript;
+          
+          const cleanBuffer = normalizeText(rollingBuffer);
+          const targetWakePhrase = normalizeText(wakeWordInput.value);
+
+          const matchIndex = cleanBuffer.indexOf(targetWakePhrase);
+
+          if (matchIndex !== -1 && targetWakePhrase.length > 0) {
+            // Extract text after the wake phrase
+            const command = cleanBuffer.substring(matchIndex + targetWakePhrase.length).trim();
+            if (command.length > 0) {
+              processCommand(command);
+            }
+          }
+
+          // Cap buffer size to prevent memory leaks over hours of listening
+          if (rollingBuffer.length > 300) {
+            rollingBuffer = rollingBuffer.slice(-300);
+          }
+        }
+      }
+    };
+
+    recognition.onend = () => {
+      if (interimDiv) { interimDiv.remove(); interimDiv = null; }
+      
+      // If system is active AND we are not currently talking, restart mic immediately
+      if (isSystemActive && !isSpeaking) {
+        try { recognition.start(); } catch (e) { }
+      } else if (!isSystemActive) {
+        logMessage("[System] Stopped completely.", "sys");
+      }
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error !== 'no-speech') {
+        logMessage(`[Error]: ${event.error}`, 'sys');
+      }
+    };
+
+    startBtn.onclick = () => {
+      // Set language dynamically from the dropdown before starting
+      recognition.lang = langSelect.value;
+      
+      isSystemActive = true;
+      rollingBuffer = "";
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      logMessage(`[System] Starting engine in ${recognition.lang}...`, "sys");
+      
+      try { recognition.start(); } catch(e) {}
+    };
+
+    stopBtn.onclick = () => {
+      isSystemActive = false;
+      recognition.stop();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    };
+
+  </script>
+</body>
+</html>
+
