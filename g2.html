@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Paddle Ball Game</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: auto; background: #121212; color: #f0f0f0; }
+    .panel { background: #1e1e1e; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #333; }
+    .setting-row { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+    input[type="text"] { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #111; color: #fff; width: 60%; }
+    button { padding: 10px 18px; font-size: 1rem; margin-right: 8px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
+    button:disabled { background: #555; color: #999; cursor: not-allowed; }
+    
+    #displayArea { background: #1a1a1a; border: 2px solid #444; border-radius: 8px; height: 220px; position: relative; overflow: hidden; margin-bottom: 15px; display: flex; align-items: center; justify-content: center; }
+    canvas { background: #000; border-radius: 4px; }
+
+    #log { background: #000; border: 1px solid #333; padding: 10px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.9em; border-radius: 4px; }
+    .ack { color: #000; font-weight: bold; background: #00ff66; padding: 2px 6px; display: inline-block; border-radius: 3px; }
+    .sys { color: #888; font-size: 0.8em; }
+  </style>
+</head>
+<body>
+
+  <h2>Voice Paddle Ball Game</h2>
+
+  <div class="panel">
+    <div class="setting-row">
+      <label><input type="checkbox" id="useWakeWord" checked> Use Wake Word</label>
+    </div>
+    <div class="setting-row">
+      <label>Wake Phrase:</label>
+      <input type="text" id="wakeWordInput" value="computer it's for you">
+    </div>
+  </div>
+
+  <div id="displayArea">
+    <canvas id="pongCanvas" width="400" height="200"></canvas>
+  </div>
+
+  <div style="margin-bottom: 15px;">
+    <button id="startBtn">Start Game</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div id="log">System Ready... Say "play game", then say "left", "right", "left left", etc.</div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const logEl = document.getElementById('log');
+    const useWakeWordCb = document.getElementById('useWakeWord');
+    const wakeWordInput = document.getElementById('wakeWordInput');
+    const pongCanvas = document.getElementById('pongCanvas');
+    const ctx = pongCanvas.getContext('2d');
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const synth = window.speechSynthesis;
+    window.utteranceKeeper = [];
+
+    let isRunning = false;
+    let isSpeaking = false;
+    let currentLangIndex = 0;
+    let scanTimeout = null;
+    let rollingBuffer = "";
+    
+    // Game variables
+    let paddleX = 160;
+    let ballX = 200, ballY = 100, ballDx = 2, ballDy = -2;
+    let gameInterval = null;
+
+    const languages = [
+      { code: 'en-US', label: 'English' },
+      { code: 'hi-IN', label: 'Hindi' }
+    ];
+
+    const recognizers = languages.map(lang => {
+      const rec = new SpeechRecognition();
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.lang = lang.code;
+      return { rec, ...lang };
+    });
+
+    function logMessage(msg, type = 'sys') {
+      const entry = document.createElement('div');
+      entry.className = type;
+      entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function normalizeText(text) {
+      return text.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9\u0900-\u097F\s]/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    function executeCommand(command, langCode) {
+      logMessage(`[Command]: "${command}"`, 'ack');
+
+      // Count occurrences of left/right in the spoken phrase for cumulative movement
+      const leftMatches = (command.match(/left|बाएं/g) || []).length;
+      const rightMatches = (command.match(/right|दाएं/g) || []).length;
+
+      if (leftMatches > 0) {
+        paddleX -= (leftMatches * 25); // Shift left per word instance
+        if (paddleX < 0) paddleX = 0;
+      }
+      
+      if (rightMatches > 0) {
+        paddleX += (rightMatches * 25); // Shift right per word instance
+        if (paddleX > 320) paddleX = 320;
+      }
+
+      rollingBuffer = "";
+    }
+
+    function startGameLoop() {
+      if (gameInterval) return;
+      gameInterval = setInterval(() => {
+        ctx.clearRect(0, 0, pongCanvas.width, pongCanvas.height);
+        
+        // Draw Paddle
+        ctx.fillStyle = "#00ff66";
+        ctx.fillRect(paddleX, 185, 80, 10);
+
+        // Move Ball
+        ballX += ballDx;
+        ballY += ballDy;
+        if (ballX < 5 || ballX > 395) ballDx = -ballDx;
+        if (ballY < 5) ballDy = -ballDy;
+
+        // Paddle Collision
+        if (ballY >= 175 && ballX >= paddleX && ballX <= paddleX + 80) {
+          ballDy = -ballDy;
+        }
+
+        // Draw Ball
+        ctx.beginPath();
+        ctx.arc(ballX, ballY, 6, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffaa00";
+        ctx.fill();
+        ctx.closePath();
+      }, 1000 / 30);
+    }
+
+    function stopGameLoop() {
+      clearInterval(gameInterval);
+      gameInterval = null;
+    }
+
+    function startNextScan() {
+      if (!isRunning || isSpeaking) return;
+
+      const activeObj = recognizers[currentLangIndex];
+      
+      activeObj.rec.onresult = (event) => {
+        const transcript = event.results[0][0].transcript.trim();
+        if (transcript) {
+          logMessage(`[${activeObj.label}]: "${transcript}"`, 'sys');
+
+          if (!useWakeWordCb.checked) {
+            executeCommand(transcript, activeObj.code);
+          } else {
+            rollingBuffer += " " + transcript;
+            const cleanBuffer = normalizeText(rollingBuffer);
+            const target = normalizeText(wakeWordInput.value);
+
+            if (cleanBuffer.includes(target) && target.length > 0) {
+              const parts = cleanBuffer.split(target);
+              const command = parts[parts.length - 1].trim();
+              if (command) executeCommand(command, activeObj.code);
+            }
+            if (rollingBuffer.length > 300) rollingBuffer = rollingBuffer.slice(-300);
+          }
+        }
+      };
+
+      activeObj.rec.onerror = () => {};
+      activeObj.rec.onend = () => {
+        if (!isRunning || isSpeaking) return;
+        currentLangIndex = (currentLangIndex + 1) % recognizers.length;
+        scanTimeout = setTimeout(startNextScan, 50); // Fast scan loop for snappy game control
+      };
+
+      try {
+        activeObj.rec.start();
+      } catch (e) {
+        currentLangIndex = (currentLangIndex + 1) % recognizers.length;
+        scanTimeout = setTimeout(startNextScan, 100);
+      }
+    }
+
+    function stopActiveScan() {
+      clearTimeout(scanTimeout);
+      recognizers.forEach(r => { try { r.rec.stop(); } catch(e) {} });
+    }
+
+    startBtn.onclick = () => {
+      isRunning = true;
+      currentLangIndex = 0;
+      rollingBuffer = "";
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      startGameLoop();
+      logMessage("Game started! Speak 'left', 'left left', or 'right right right'.", "sys");
+      startNextScan();
+    };
+
+    stopBtn.onclick = () => {
+      isRunning = false;
+      stopActiveScan();
+      stopGameLoop();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      logMessage("Game stopped.", "sys");
+    };
+  </script>
+</body>
+</html>
