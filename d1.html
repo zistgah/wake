@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mic & Speech Diagnostic</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #111; color: #eee; }
+    #meter { width: 100%; height: 20px; background: #333; margin: 10px 0; border-radius: 4px; overflow: hidden; }
+    #fill { width: 0%; height: 100%; background: #00ff66; transition: width 0.05s; }
+    #console { background: #222; padding: 10px; height: 300px; overflow-y: auto; border: 1px solid #444; }
+    .err { color: #ff4444; }
+    .ok { color: #00ff66; }
+  </style>
+</head>
+<body>
+  <h3>System Diagnostics</h3>
+  <button id="run">Test Microphone & Speech</button>
+  
+  <p>Microphone Input Level:</p>
+  <div id="meter"><div id="fill"></div></div>
+
+  <div id="console">Click "Test Microphone & Speech" to begin...</div>
+
+  <script>
+    const log = (msg, cls = '') => {
+      const c = document.getElementById('console');
+      c.innerHTML += `<div class="${cls}">[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+      c.scrollTop = c.scrollHeight;
+    };
+
+    document.getElementById('run').onclick = async () => {
+      log("Initializing Audio Pipeline...");
+
+      // 1. Check raw microphone access and feed volume meter
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        log("Microphone access GRANTED.", "ok");
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const src = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        src.connect(analyser);
+
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const fill = document.getElementById('fill');
+
+        function updateMeter() {
+          analyser.getByteFrequencyData(data);
+          let sum = 0;
+          for (let i = 0; i < data.length; i++) sum += data[i];
+          let avg = sum / data.length;
+          fill.style.width = Math.min(100, avg * 2) + '%';
+          requestAnimationFrame(updateMeter);
+        }
+        updateMeter();
+        log("Volume meter active. Speak now to verify green bar moves.", "ok");
+
+      } catch (err) {
+        log(`Microphone Hardware ERROR: ${err.message}`, "err");
+        return;
+      }
+
+      // 2. Test Speech Engine
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        log("SpeechRecognition API NOT supported in this browser.", "err");
+        return;
+      }
+
+      const rec = new SpeechRecognition();
+      rec.continuous = true;
+      rec.interimResults = true;
+
+      rec.onstart = () => log("Google Speech Engine started. Connection established.", "ok");
+      rec.onerror = (e) => log(`Google Speech Engine ERROR: ${e.error}`, "err");
+      rec.onresult = (e) => {
+        let text = e.results[e.results.length - 1][0].transcript;
+        log(`TRANSCRIPT RECEIVED: "${text}"`, "ok");
+      };
+
+      try {
+        rec.start();
+      } catch (e) {
+        log(`Speech Start Failed: ${e.message}`, "err");
+      }
+    };
+  </script>
+</body>
+</html>
