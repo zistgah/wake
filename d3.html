@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Android-Safe Wake Word Listener</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: auto; background: #111; color: #eee; }
+    button { padding: 12px 20px; font-size: 1rem; margin-right: 8px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
+    button:disabled { background: #555; }
+    #log { background: #222; border: 1px solid #444; padding: 12px; height: 400px; overflow-y: auto; font-family: monospace; border-radius: 4px; margin-top: 15px; }
+    .interim { color: #888; }
+    .final { color: #00ff66; }
+    .ack { color: #000; font-weight: bold; background: #00ff66; padding: 4px; margin-top: 4px; display: inline-block; }
+    .sys { color: #ffaa00; font-size: 0.8em; }
+  </style>
+</head>
+<body>
+
+  <h2>Mobile Wake Word Listener</h2>
+  <button id="startBtn">Start Listening</button>
+  <button id="stopBtn" disabled>Stop</button>
+
+  <div id="log">Ready to start...</div>
+
+  <script>
+    const WAKE_PHRASE = "computer it's for you";
+    // Using a simpler normalized version for the matching logic
+    const WAKE_MATCH = "computer its for you"; 
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const logEl = document.getElementById('log');
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      alert("Web Speech API not supported.");
+    } else {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true; 
+      
+      // Note: You can change this to 'hi-IN' if you want it to heavily bias towards Hindi
+      recognition.lang = 'en-US'; 
+
+      let isListening = false;
+      let interimDiv = null;
+      let rollingBuffer = "";
+
+      function logMessage(msg, type = 'sys') {
+        const entry = document.createElement('div');
+        entry.className = type;
+        entry.innerHTML = msg;
+        logEl.appendChild(entry);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      recognition.onstart = () => logMessage("[System] Microphone active.", "sys");
+
+      recognition.onresult = (event) => {
+        let interimTranscript = '';
+        let finalTranscript = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const chunk = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += chunk;
+          } else {
+            interimTranscript += chunk;
+          }
+        }
+
+        // 1. Show live typing effect for interim results
+        if (interimTranscript) {
+          if (!interimDiv) {
+            interimDiv = document.createElement('div');
+            interimDiv.className = 'interim';
+            logEl.appendChild(interimDiv);
+          }
+          interimDiv.textContent = `[Hearing...] ${interimTranscript}`;
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        // 2. Process final results
+        if (finalTranscript) {
+          if (interimDiv) { interimDiv.remove(); interimDiv = null; }
+          logMessage(`[Heard] "${finalTranscript.trim()}"`, 'final');
+
+          // Add to rolling buffer to prevent split-phrase loss
+          rollingBuffer += " " + finalTranscript;
+
+          // Normalize for wake phrase detection
+          const cleanBuffer = rollingBuffer
+            .toLowerCase()
+            .replace(/['’]/g, "") // "it's" -> "its"
+            .replace(/[^a-z0-9\s]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+
+          const matchIndex = cleanBuffer.indexOf(WAKE_MATCH);
+
+          if (matchIndex !== -1) {
+            const command = cleanBuffer.substring(matchIndex + WAKE_MATCH.length).trim();
+            
+            if (command.length > 0) {
+              logMessage(`[ACK] Wake word detected! Command: "${command}"`, 'ack');
+              rollingBuffer = ""; // Reset buffer after successful command
+            }
+          }
+
+          // Cap buffer size
+          if (rollingBuffer.length > 300) {
+            rollingBuffer = rollingBuffer.slice(-300);
+          }
+        }
+      };
+
+      recognition.onerror = (event) => {
+        if (event.error !== 'no-speech') {
+          logMessage(`[Error] ${event.error}`, 'sys');
+        }
+      };
+
+      recognition.onend = () => {
+        if (interimDiv) { interimDiv.remove(); interimDiv = null; }
+        
+        if (isListening) {
+          // Android aggressive keep-alive loop
+          logMessage("[System] Android triggered sleep. Restarting...", "sys");
+          try {
+            recognition.start();
+          } catch (e) { }
+        } else {
+          logMessage("[System] Engine stopped completely.", "sys");
+        }
+      };
+
+      startBtn.onclick = () => {
+        isListening = true;
+        rollingBuffer = "";
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        try { recognition.start(); } catch(e) {}
+      };
+
+      stopBtn.onclick = () => {
+        isListening = false;
+        recognition.stop();
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      };
+    }
+  </script>
+</body>
+</html>
