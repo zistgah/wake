@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dual-Language Interleaved Listener</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: auto; background: #121212; color: #f0f0f0; }
+    .panel { background: #1e1e1e; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #333; }
+    .setting-row { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+    input[type="text"] { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #111; color: #fff; width: 60%; }
+    button { padding: 12px 20px; font-size: 1rem; margin-right: 8px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
+    button:disabled { background: #555; color: #999; cursor: not-allowed; }
+    #log { background: #000; border: 1px solid #333; padding: 12px; height: 350px; overflow-y: auto; font-family: monospace; border-radius: 4px; }
+    .en { color: #00bfff; }
+    .hi { color: #ffaa00; }
+    .ack { color: #000; font-weight: bold; background: #00ff66; padding: 4px; display: inline-block; border-radius: 3px; }
+    .sys { color: #888; font-size: 0.8em; }
+  </style>
+</head>
+<body>
+
+  <h2>Dual-Language Alternating Listener (EN / HI)</h2>
+
+  <div class="panel">
+    <div class="setting-row">
+      <label>
+        <input type="checkbox" id="useWakeWord" checked> Use Wake Word
+      </label>
+    </div>
+    <div class="setting-row">
+      <label>Wake Phrase:</label>
+      <input type="text" id="wakeWordInput" value="computer it's for you">
+    </div>
+  </div>
+
+  <div style="margin-bottom: 15px;">
+    <button id="startBtn">Start Dual Scanning</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div id="log">System Ready...</div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const logEl = document.getElementById('log');
+    const useWakeWordCb = document.getElementById('useWakeWord');
+    const wakeWordInput = document.getElementById('wakeWordInput');
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const synth = window.speechSynthesis;
+    window.utteranceKeeper = [];
+
+    let isRunning = false;
+    let isSpeaking = false;
+    let currentLangIndex = 0; // 0 = English, 1 = Hindi
+    let scanTimeout = null;
+    let rollingBuffer = "";
+
+    const languages = [
+      { code: 'en-US', label: 'English' },
+      { code: 'hi-IN', label: 'Hindi' }
+    ];
+
+    // Build two distinct recognition objects ahead of time
+    const recognizers = languages.map(lang => {
+      const rec = new SpeechRecognition();
+      rec.continuous = false; // Single short burst per cycle
+      rec.interimResults = false;
+      rec.lang = lang.code;
+      return { rec, ...lang };
+    });
+
+    function logMessage(msg, type = 'sys') {
+      const entry = document.createElement('div');
+      entry.className = type;
+      entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function normalizeText(text) {
+      return text.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9\u0900-\u097F\s]/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    function speakOutLoud(text, langCode) {
+      if (!text.trim()) return;
+      isSpeaking = true;
+      stopActiveScan();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = langCode;
+      window.utteranceKeeper.push(utterance);
+
+      utterance.onend = () => {
+        isSpeaking = false;
+        window.utteranceKeeper = window.utteranceKeeper.filter(u => u !== utterance);
+        if (isRunning) startNextScan();
+      };
+      
+      utterance.onerror = () => {
+        isSpeaking = false;
+        window.utteranceKeeper = window.utteranceKeeper.filter(u => u !== utterance);
+        if (isRunning) startNextScan();
+      };
+
+      synth.speak(utterance);
+    }
+
+    function processCommand(text, langCode) {
+      logMessage(`[Command (${langCode})]: "${text}"`, 'ack');
+      speakOutLoud(`Heard: ${text}`, langCode);
+      rollingBuffer = "";
+    }
+
+    function startNextScan() {
+      if (!isRunning || isSpeaking) return;
+
+      const activeObj = recognizers[currentLangIndex];
+      logMessage(`Scanning channel: ${activeObj.label}...`, 'sys');
+
+      activeObj.rec.onresult = (event) => {
+        const transcript = event.results[0][0].transcript.trim();
+        if (transcript) {
+          logMessage(`[${activeObj.label} Heard]: "${transcript}"`, activeObj.code.startsWith('hi') ? 'hi' : 'en');
+
+          if (!useWakeWordCb.checked) {
+            processCommand(transcript, activeObj.code);
+          } else {
+            rollingBuffer += " " + transcript;
+            const cleanBuffer = normalizeText(rollingBuffer);
+            const target = normalizeText(wakeWordInput.value);
+
+            if (cleanBuffer.includes(target) && target.length > 0) {
+              const parts = cleanBuffer.split(target);
+              const command = parts[parts.length - 1].trim();
+              if (command) processCommand(command, activeObj.code);
+            }
+
+            if (rollingBuffer.length > 300) rollingBuffer = rollingBuffer.slice(-300);
+          }
+        }
+      };
+
+      activeObj.rec.onerror = () => {}; // Ignore frame drops/timeouts
+
+      activeObj.rec.onend = () => {
+        if (!isRunning || isSpeaking) return;
+        // Flip to the other language for the next burst
+        currentLangIndex = (currentLangIndex + 1) % recognizers.length;
+        
+        // Brief 150ms pause to let hardware release the microphone safely
+        scanTimeout = setTimeout(startNextScan, 150);
+      };
+
+      try {
+        activeObj.rec.start();
+      } catch (e) {
+        // If state collides, force flip index and retry
+        currentLangIndex = (currentLangIndex + 1) % recognizers.length;
+        scanTimeout = setTimeout(startNextScan, 300);
+      }
+    }
+
+    function stopActiveScan() {
+      clearTimeout(scanTimeout);
+      recognizers.forEach(r => {
+        try { r.rec.stop(); } catch(e) {}
+      });
+    }
+
+    startBtn.onclick = () => {
+      isRunning = true;
+      currentLangIndex = 0;
+      rollingBuffer = "";
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      logMessage("Starting alternating EN/HI scanner...", "sys");
+      startNextScan();
+    };
+
+    stopBtn.onclick = () => {
+      isRunning = false;
+      stopActiveScan();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      logMessage("Scanner stopped.", "sys");
+    };
+  </script>
+</body>
+</html>
+
