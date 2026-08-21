@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RT Voice Paddle</title>
+<style>
+  body {
+    margin: 0;
+    padding: 20px;
+    background: #121212;
+    color: #eee;
+    font: 15px system-ui, sans-serif;
+  }
+
+  .app {
+    width: min(600px, 100%);
+    margin: auto;
+  }
+
+  .panel {
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  select, button {
+    font: inherit;
+    padding: 9px 12px;
+    border-radius: 5px;
+    border: 1px solid #555;
+  }
+
+  select {
+    flex: 1;
+    background: #111;
+    color: white;
+  }
+
+  button {
+    background: #087cff;
+    color: white;
+    border: 0;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  button:disabled {
+    background: #444;
+    color: #999;
+    cursor: default;
+  }
+
+  canvas {
+    display: block;
+    width: 100%;
+    max-width: 400px;
+    margin: auto;
+    background: #000;
+    border: 2px solid #444;
+    border-radius: 8px;
+  }
+
+  #heard {
+    margin-top: 10px;
+    min-height: 20px;
+    color: #00ff66;
+    font-weight: 700;
+  }
+
+  #status {
+    margin-top: 6px;
+    color: #999;
+    font-size: 13px;
+  }
+</style>
+</head>
+
+<body>
+<div class="app">
+
+  <h2>RT Voice Paddle</h2>
+
+  <div class="panel">
+    <div class="row">
+      <select id="lang">
+        <option value="en-US">English</option>
+        <option value="hi-IN">Hindi</option>
+      </select>
+
+      <button id="start">Start</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <canvas id="canvas" width="400" height="200"></canvas>
+    <div id="heard"></div>
+    <div id="status">Ready. Say "left" or "right".</div>
+  </div>
+
+</div>
+
+<script>
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+const startBtn = document.getElementById("start");
+const stopBtn = document.getElementById("stop");
+const langSelect = document.getElementById("lang");
+
+const heardEl = document.getElementById("heard");
+const statusEl = document.getElementById("status");
+
+const SpeechRecognition =
+  window.SpeechRecognition ||
+  window.webkitSpeechRecognition;
+
+if (!SpeechRecognition) {
+  statusEl.textContent =
+    "Speech recognition is not supported in this browser.";
+  startBtn.disabled = true;
+}
+
+/* =========================
+   GAME STATE
+   ========================= */
+
+let paddleX = 160;
+
+let ballX = 200;
+let ballY = 100;
+
+let ballDX = 2.5;
+let ballDY = -2.5;
+
+/*
+  Commands are discrete events.
+
+  -1 = left
+  +1 = right
+*/
+const commandQueue = [];
+
+
+/* =========================
+   VOICE STATE
+   ========================= */
+
+let running = false;
+let recognition = null;
+
+if (SpeechRecognition) {
+
+  recognition = new SpeechRecognition();
+
+  recognition.continuous = true;
+
+  /*
+    Only consume finalized speech.
+    This is critical.
+  */
+  recognition.interimResults = false;
+
+  recognition.onresult = event => {
+
+    for (
+      let i = event.resultIndex;
+      i < event.results.length;
+      i++
+    ) {
+
+      const result = event.results[i];
+
+      if (!result.isFinal)
+        continue;
+
+      const text = result[0]
+        .transcript
+        .trim()
+        .toLowerCase();
+
+      if (!text)
+        continue;
+
+      heardEl.textContent = `"${text}"`;
+
+      /*
+        Tokenize the finalized utterance.
+      */
+      const words = text.split(/\s+/);
+
+      for (const word of words) {
+
+        if (
+          word === "left" ||
+          word === "बाएं" ||
+          word === "बाएँ"
+        ) {
+          commandQueue.push(-1);
+        }
+
+        if (
+          word === "right" ||
+          word === "दाएं" ||
+          word === "दाएँ"
+        ) {
+          commandQueue.push(+1);
+        }
+      }
+    }
+  };
+
+
+  /*
+    Chrome/Speech API will periodically terminate
+    recognition even with continuous=true.
+  */
+  recognition.onend = () => {
+
+    if (!running)
+      return;
+
+    /*
+      Restart on the next event-loop turn so that
+      the browser has finished closing the old session.
+    */
+    setTimeout(() => {
+
+      if (!running)
+        return;
+
+      try {
+        recognition.start();
+      } catch (_) {
+        /*
+          Already running / browser transition.
+          Ignore and let onend recover.
+        */
+      }
+
+    }, 50);
+  };
+
+
+  recognition.onerror = event => {
+
+    /*
+      Do not kill the application for transient
+      speech recognition errors.
+    */
+
+    if (running) {
+      statusEl.textContent =
+        "Listening…";
+    }
+  };
+}
+
+
+/* =========================
+   GAME
+   ========================= */
+
+function update() {
+
+  /*
+    Consume all commands generated since
+    the previous frame.
+  */
+  while (commandQueue.length > 0) {
+
+    const direction = commandQueue.shift();
+
+    paddleX += direction * 15;
+  }
+
+  /*
+    Clamp paddle.
+  */
+  paddleX = Math.max(
+    0,
+    Math.min(320, paddleX)
+  );
+
+
+  /*
+    Ball.
+  */
+  ballX += ballDX;
+  ballY += ballDY;
+
+
+  /*
+    Side walls.
+  */
+  if (
+    ballX <= 5 ||
+    ballX >= 395
+  ) {
+    ballDX *= -1;
+  }
+
+
+  /*
+    Top wall.
+  */
+  if (ballY <= 5) {
+    ballDY *= -1;
+  }
+
+
+  /*
+    Paddle.
+  */
+  if (
+    ballY >= 174 &&
+    ballX >= paddleX &&
+    ballX <= paddleX + 80 &&
+    ballDY > 0
+  ) {
+    ballDY *= -1;
+    ballY = 174;
+  }
+
+
+  /*
+    Miss.
+  */
+  if (ballY > 210) {
+
+    ballX = 200;
+    ballY = 100;
+
+    ballDX =
+      Math.random() < 0.5 ? 2.5 : -2.5;
+
+    ballDY = -2.5;
+  }
+}
+
+
+function draw() {
+
+  ctx.clearRect(
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
+
+
+  /*
+    Paddle
+  */
+  ctx.fillStyle = "#00ff66";
+
+  ctx.fillRect(
+    paddleX,
+    185,
+    80,
+    10
+  );
+
+
+  /*
+    Ball
+  */
+  ctx.beginPath();
+
+  ctx.arc(
+    ballX,
+    ballY,
+    6,
+    0,
+    Math.PI * 2
+  );
+
+  ctx.fillStyle = "#ffaa00";
+  ctx.fill();
+
+  ctx.closePath();
+}
+
+
+/*
+  Proper browser animation loop.
+*/
+function frame() {
+
+  update();
+  draw();
+
+  requestAnimationFrame(frame);
+}
+
+frame();
+
+
+/* =========================
+   CONTROLS
+   ========================= */
+
+startBtn.onclick = () => {
+
+  if (!recognition)
+    return;
+
+  running = true;
+
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+
+  recognition.lang =
+    langSelect.value;
+
+  statusEl.textContent =
+    "Listening…";
+
+  try {
+    recognition.start();
+  } catch (_) {
+    /*
+      Browser may already have a live
+      recognition session.
+    */
+  }
+};
+
+
+stopBtn.onclick = () => {
+
+  running = false;
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+
+  commandQueue.length = 0;
+
+  if (recognition) {
+    try {
+      recognition.stop();
+    } catch (_) {}
+  }
+
+  statusEl.textContent =
+    "Stopped.";
+};
+</script>
+</body>
+</html>
