@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Strict Architecture RT Voice Paddle</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: auto; background: #121212; color: #f0f0f0; }
+    .panel { background: #1e1e1e; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #333; }
+    .setting-row { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+    select, input[type="text"] { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #111; color: #fff; width: 60%; }
+    button { padding: 10px 18px; font-size: 1rem; margin-right: 8px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
+    button:disabled { background: #555; color: #999; cursor: not-allowed; }
+    
+    #displayArea { background: #1a1a1a; border: 2px solid #444; border-radius: 8px; height: 220px; position: relative; overflow: hidden; margin-bottom: 15px; display: flex; align-items: center; justify-content: center; }
+    canvas { background: #000; border-radius: 4px; }
+
+    #log { background: #000; border: 1px solid #333; padding: 10px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.9em; border-radius: 4px; }
+    .ack { color: #00ff66; font-weight: bold; }
+    .sys { color: #888; font-size: 0.8em; }
+  </style>
+</head>
+<body>
+
+  <h2>Strict Architecture RT Voice Paddle</h2>
+
+  <div class="panel">
+    <div class="setting-row">
+      <label>Language:</label>
+      <select id="langSelect">
+        <option value="en-US">English</option>
+        <option value="hi-IN">Hindi</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="displayArea">
+    <canvas id="pongCanvas" width="400" height="200"></canvas>
+  </div>
+
+  <div style="margin-bottom: 15px;">
+    <button id="startBtn">Start Game</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div id="log">System Ready... Say "left" or "right".</div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const logEl = document.getElementById('log');
+    const langSelect = document.getElementById('langSelect');
+    const pongCanvas = document.getElementById('pongCanvas');
+    const ctx = pongCanvas.getContext('2d');
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) alert("Speech Recognition not supported.");
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    let isRunning = false;
+    let lastProcessedLength = 0; // Tracks string index to isolate ONLY newly appended words
+    
+    // GAME THREAD STATE
+    let paddleX = 160;
+    let inputDelta = 0; // Pure scalar: -1 or +1 accumulator sent to game thread
+    let ballX = 200, ballY = 100, ballDx = 2.5, ballDy = -2.5;
+    let gameInterval = null;
+
+    function logMessage(msg, type = 'sys') {
+      const entry = document.createElement('div');
+      entry.className = type;
+      entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // SPEECH LISTENER: Isolates strictly the newly uttered chunk, parses + / - vector
+    recognition.onresult = (event) => {
+      let fullTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        fullTranscript += event.results[i][0].transcript;
+      }
+
+      // Extract ONLY the brand new slice since the last event fire
+      const newChunk = fullTranscript.slice(lastProcessedLength).trim().toLowerCase();
+      
+      // If result index rolled over (browser cleared internal buffer), reset tracker
+      if (fullTranscript.length < lastProcessedLength) {
+        lastProcessedLength = 0;
+        return;
+      }
+
+      if (newChunk) {
+        lastProcessedLength = fullTranscript.length;
+        logMessage(`[Heard Chunk]: "${newChunk}"`, 'ack');
+
+        const lefts = (newChunk.match(/left|बाएं/g) || []).length;
+        const rights = (newChunk.match(/right|दाएं/g) || []).length;
+
+        // Push raw +/- scalar directly to the game thread command vector
+        if (lefts > 0) inputDelta -= lefts;
+        if (rights > 0) inputDelta += rights;
+      }
+    };
+
+    recognition.onend = () => {
+      if (isRunning) {
+        lastProcessedLength = 0;
+        try { recognition.start(); } catch(e) {}
+      }
+    };
+
+    recognition.onerror = () => {
+      if (isRunning) {
+        lastProcessedLength = 0;
+        try { recognition.start(); } catch(e) {}
+      }
+    };
+
+    // INDEPENDENT GAME THREAD (Maintains pos var, adjusts with min/max check)
+    function startGameLoop() {
+      if (gameInterval) return;
+      gameInterval = setInterval(() => {
+        ctx.clearRect(0, 0, pongCanvas.width, pongCanvas.height);
+        
+        // Apply scalar delta to paddle position with strict bounds checking (0 to 320)
+        if (inputDelta !== 0) {
+          paddleX += inputDelta * 15; // Scale movement step per instruction count
+          if (paddleX < 0) paddleX = 0;
+          if (paddleX > 320) paddleX = 320;
+          inputDelta = 0; // Consume the delta vector for this frame
+        }
+
+        // Draw Paddle
+        ctx.fillStyle = "#00ff66";
+        ctx.fillRect(paddleX, 185, 80, 10);
+
+        // Move Ball
+        ballX += ballDx;
+        ballY += ballDy;
+        if (ballX < 5 || ballX > 395) ballDx = -ballDx;
+        if (ballY < 5) ballDy = -ballDy;
+
+        // Paddle Collision
+        if (ballY >= 175 && ballX >= paddleX && ballX <= paddleX + 80) {
+          ballDy = -ballDy;
+        }
+
+        // Draw Ball
+        ctx.beginPath();
+        ctx.arc(ballX, ballY, 6, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffaa00";
+        ctx.fill();
+        ctx.closePath();
+      }, 1000 / 30);
+    }
+
+    function stopGameLoop() {
+      clearInterval(gameInterval);
+      gameInterval = null;
+    }
+
+    startBtn.onclick = () => {
+      isRunning = true;
+      lastProcessedLength = 0;
+      inputDelta = 0;
+      recognition.lang = langSelect.value;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      startGameLoop();
+      
+      try { recognition.start(); } catch(e) {}
+      logMessage("Game thread running with isolated delta pipe.", "sys");
+    };
+
+    stopBtn.onclick = () => {
+      isRunning = false;
+      recognition.stop();
+      stopGameLoop();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      logMessage("Game stopped.", "sys");
+    };
+  </script>
+</body>
+</html>
+
