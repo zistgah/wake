@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice-Controlled Interactive Hub</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 20px; max-width: 700px; margin: auto; background: #121212; color: #f0f0f0; transition: background 0.3s; }
+    .panel { background: #1e1e1e; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #333; }
+    .setting-row { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+    input[type="text"] { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #111; color: #fff; width: 60%; }
+    button { padding: 10px 18px; font-size: 1rem; margin-right: 8px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
+    button:disabled { background: #555; color: #999; cursor: not-allowed; }
+    
+    /* Interactive Canvas Area */
+    #displayArea { background: #1a1a1a; border: 2px solid #444; border-radius: 8px; height: 220px; position: relative; overflow: hidden; margin-bottom: 15px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    canvas { background: #000; border-radius: 4px; }
+    
+    /* Candle Styling */
+    .candle-container { display: none; align-items: flex-end; gap: 30px; height: 100%; justify-content: center; padding-top: 40px; }
+    .candle { width: 25px; height: 90px; background: #e0e0e0; border-radius: 4px; position: relative; }
+    .flame { width: 16px; height: 26px; background: orange; border-radius: 50% 50% 20% 20%; position: absolute; top: -30px; left: 4.5px; animation: flicker 0.1s infinite alternate; box-shadow: 0 0 10px yellow; }
+    .flame.extinguished { display: none; }
+    @keyframes flicker { 0% { transform: scale(1); opacity: 0.9; } 100% { transform: scale(1.1); opacity: 1; } }
+
+    #log { background: #000; border: 1px solid #333; padding: 10px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.9em; border-radius: 4px; }
+    .en { color: #00bfff; }
+    .hi { color: #ffaa00; }
+    .ack { color: #000; font-weight: bold; background: #00ff66; padding: 2px 6px; display: inline-block; border-radius: 3px; }
+    .sys { color: #888; font-size: 0.8em; }
+  </style>
+</head>
+<body>
+
+  <h2>Voice Command Hub & Mini-Game</h2>
+
+  <div class="panel">
+    <div class="setting-row">
+      <label><input type="checkbox" id="useWakeWord" checked> Use Wake Word</label>
+    </div>
+    <div class="setting-row">
+      <label>Wake Phrase:</label>
+      <input type="text" id="wakeWordInput" value="computer it's for you">
+    </div>
+  </div>
+
+  <!-- Dynamic Visual Display Area -->
+  <div id="displayArea">
+    <!-- Game Canvas -->
+    <canvas id="pongCanvas" width="400" height="200"></canvas>
+    <!-- Candles -->
+    <div class="candle-container" id="candleBox">
+      <div class="candle"><div class="flame" id="f1"></div></div>
+      <div class="candle"><div class="flame" id="f2"></div></div>
+      <div class="candle"><div class="flame" id="f3"></div></div>
+    </div>
+  </div>
+
+  <div style="margin-bottom: 15px;">
+    <button id="startBtn">Start Hub</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div id="log">System Ready... Say "turn screen red", "light candles", or "play game"...</div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const logEl = document.getElementById('log');
+    const useWakeWordCb = document.getElementById('useWakeWord');
+    const wakeWordInput = document.getElementById('wakeWordInput');
+    const displayArea = document.getElementById('displayArea');
+    const pongCanvas = document.getElementById('pongCanvas');
+    const candleBox = document.getElementById('candleBox');
+    const ctx = pongCanvas.getContext('2d');
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const synth = window.speechSynthesis;
+    window.utteranceKeeper = [];
+
+    let isRunning = false;
+    let isSpeaking = false;
+    let currentLangIndex = 0;
+    let scanTimeout = null;
+    let rollingBuffer = "";
+    let activeMode = "home"; // "home", "candles", "game"
+
+    // Game variables
+    let paddleX = 160;
+    let paddleDx = 0;
+    let ballX = 200, ballY = 100, ballDx = 2, ballDy = -2;
+    let gameInterval = null;
+
+    const languages = [
+      { code: 'en-US', label: 'English' },
+      { code: 'hi-IN', label: 'Hindi' }
+    ];
+
+    const recognizers = languages.map(lang => {
+      const rec = new SpeechRecognition();
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.lang = lang.code;
+      return { rec, ...lang };
+    });
+
+    function logMessage(msg, type = 'sys') {
+      const entry = document.createElement('div');
+      entry.className = type;
+      entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function normalizeText(text) {
+      return text.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9\u0900-\u097F\s]/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    // --- VIEW CONTROLLERS ---
+    function showHomeView() {
+      activeMode = "home";
+      pongCanvas.style.display = "none";
+      candleBox.style.display = "none";
+      stopGameLoop();
+    }
+
+    function showCandlesView(lightOn) {
+      activeMode = "candles";
+      pongCanvas.style.display = "none";
+      candleBox.style.display = "flex";
+      stopGameLoop();
+      document.querySelectorAll('.flame').forEach(f => {
+        if (lightOn) f.classList.remove('extinguished');
+        else f.classList.add('extinguished');
+      });
+    }
+
+    function showGameView() {
+      activeMode = "game";
+      candleBox.style.display = "none";
+      pongCanvas.style.display = "block";
+      startGameLoop();
+    }
+
+    // --- COMMAND ROUTER ---
+    function executeCommand(command, langCode) {
+      logMessage(`[Command]: "${command}"`, 'ack');
+      let response = "Command executed.";
+
+      // 1. Background Color Controls
+      if (command.includes("red") || command.includes("लाल")) {
+        document.body.style.background = "#500";
+        response = "Background changed to red.";
+      } else if (command.includes("blue") || command.includes("नीला")) {
+        document.body.style.background = "#003366";
+        response = "Background changed to blue.";
+      } else if (command.includes("dark") || command.includes("normal") || command.includes("डार्क")) {
+        document.body.style.background = "#121212";
+        response = "Background reset.";
+      }
+
+      // 2. Candle Controls
+      else if (command.includes("light candles") || command.includes("candle on") || command.includes("मोमबत्ती जलाओ")) {
+        showCandlesView(true);
+        response = "Candles lit.";
+      } else if (command.includes("blow out") || command.includes("candle off") || command.includes("मोमबत्ती बुझाओ")) {
+        showCandlesView(false);
+        response = "Candles blown out.";
+      }
+
+      // 3. Game Controls
+      else if (command.includes("play game") || command.includes("start game") || command.includes("गेम")) {
+        showGameView();
+        response = "Starting game. Say left or right to move.";
+      } else if (command.includes("left") || command.includes("बाएं")) {
+        paddleDx = -6;
+        response = "Moving left.";
+      } else if (command.includes("right") || command.includes("दाएं")) {
+        paddleDx = 6;
+        response = "Moving right.";
+      } else if (command.includes("stop") || command.includes("रुको")) {
+        paddleDx = 0;
+        response = "Paddle stopped.";
+      } else if (command.includes("exit") || command.includes("home") || command.includes("बाहर")) {
+        showHomeView();
+        response = "Returned to home screen.";
+      }
+
+      speakOutLoud(response, langCode);
+      rollingBuffer = "";
+    }
+
+    // --- GAME ENGINE ---
+    function startGameLoop() {
+      if (gameInterval) return;
+      gameInterval = setInterval(() => {
+        ctx.clearRect(0, 0, pongCanvas.width, pongCanvas.height);
+        
+        // Move paddle
+        paddleX += paddleDx;
+        if (paddleX < 0) paddleX = 0;
+        if (paddleX > 320) paddleX = 320;
+
+        // Draw Paddle
+        ctx.fillStyle = "#00ff66";
+        ctx.fillRect(paddleX, 185, 80, 10);
+
+        // Move Ball
+        ballX += ballDx;
+        ballY += ballDy;
+        if (ballX < 5 || ballX > 395) ballDx = -ballDx;
+        if (ballY < 5) ballDy = -ballDy;
+
+        // Paddle Collision
+        if (ballY >= 175 && ballX >= paddleX && ballX <= paddleX + 80) {
+          ballDy = -ballDy;
+        }
+
+        // Draw Ball
+        ctx.beginPath();
+        ctx.arc(ballX, ballY, 6, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffaa00";
+        ctx.fill();
+        ctx.closePath();
+      }, 1000 / 30);
+    }
+
+    function stopGameLoop() {
+      clearInterval(gameInterval);
+      gameInterval = null;
+    }
+
+    function speakOutLoud(text, langCode) {
+      if (!text.trim()) return;
+      isSpeaking = true;
+      stopActiveScan();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = langCode;
+      window.utteranceKeeper.push(utterance);
+
+      utterance.onend = () => {
+        isSpeaking = false;
+        window.utteranceKeeper = window.utteranceKeeper.filter(u => u !== utterance);
+        if (isRunning) startNextScan();
+      };
+      utterance.onerror = () => {
+        isSpeaking = false;
+        window.utteranceKeeper = window.utteranceKeeper.filter(u => u !== utterance);
+        if (isRunning) startNextScan();
+      };
+
+      synth.speak(utterance);
+    }
+
+    function startNextScan() {
+      if (!isRunning || isSpeaking) return;
+
+      const activeObj = recognizers[currentLangIndex];
+      logMessage(`Scanning channel: ${activeObj.label}...`, 'sys');
+
+      activeObj.rec.onresult = (event) => {
+        const transcript = event.results[0][0].transcript.trim();
+        if (transcript) {
+          logMessage(`[${activeObj.label}]: "${transcript}"`, activeObj.code.startsWith('hi') ? 'hi' : 'en');
+
+          if (!useWakeWordCb.checked) {
+            executeCommand(transcript, activeObj.code);
+          } else {
+            rollingBuffer += " " + transcript;
+            const cleanBuffer = normalizeText(rollingBuffer);
+            const target = normalizeText(wakeWordInput.value);
+
+            if (cleanBuffer.includes(target) && target.length > 0) {
+              const parts = cleanBuffer.split(target);
+              const command = parts[parts.length - 1].trim();
+              if (command) executeCommand(command, activeObj.code);
+            }
+            if (rollingBuffer.length > 300) rollingBuffer = rollingBuffer.slice(-300);
+          }
+        }
+      };
+
+      activeObj.rec.onerror = () => {};
+      activeObj.rec.onend = () => {
+        if (!isRunning || isSpeaking) return;
+        currentLangIndex = (currentLangIndex + 1) % recognizers.length;
+        scanTimeout = setTimeout(startNextScan, 150);
+      };
+
+      try {
+        activeObj.rec.start();
+      } catch (e) {
+        currentLangIndex = (currentLangIndex + 1) % recognizers.length;
+        scanTimeout = setTimeout(startNextScan, 300);
+      }
+    }
+
+    function stopActiveScan() {
+      clearTimeout(scanTimeout);
+      recognizers.forEach(r => { try { r.rec.stop(); } catch(e) {} });
+    }
+
+    startBtn.onclick = () => {
+      isRunning = true;
+      currentLangIndex = 0;
+      rollingBuffer = "";
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      showHomeView();
+      logMessage("Hub active. Alternating EN/HI scanner running...", "sys");
+      startNextScan();
+    };
+
+    stopBtn.onclick = () => {
+      isRunning = false;
+      stopActiveScan();
+      showHomeView();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      logMessage("Hub stopped.", "sys");
+    };
+  </script>
+</body>
+</html>
