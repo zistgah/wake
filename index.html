@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wake-Word Command Listener</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: auto; line-height: 1.5; }
+    button { padding: 10px 16px; font-size: 1rem; margin-right: 8px; cursor: pointer; }
+    #status { font-weight: bold; margin: 15px 0; color: #333; }
+    #log { background: #f4f4f4; border: 1px solid #ccc; padding: 12px; height: 260px; overflow-y: auto; font-family: monospace; border-radius: 4px; }
+    .ack { color: #007a00; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+  <h2>Browser Speech Listener</h2>
+  <button id="startBtn">Start Listening</button>
+  <button id="stopBtn" disabled>Stop</button>
+
+  <p id="status">Status: Idle</p>
+  <div id="log"></div>
+
+  <script>
+    // Define target wake phrase in lowercase
+    const WAKE_PHRASE = "computer it's for you";
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      alert("Web Speech API not supported in this browser. Please use Chrome, Edge, or Safari.");
+    } else {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+
+      let isListening = false;
+
+      function logMessage(msg) {
+        const entry = document.createElement('div');
+        entry.innerHTML = msg;
+        logEl.appendChild(entry);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      recognition.onresult = (event) => {
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const result = event.results[i];
+          
+          // Case-insensitive normalization & basic punctuation stripping
+          const rawTranscript = result.transcript.toLowerCase();
+          const cleanTranscript = rawTranscript.replace(/['’]/g, "'").replace(/[^a-z0-9'\s]/g, "");
+
+          const matchIndex = cleanTranscript.indexOf(WAKE_PHRASE);
+
+          if (matchIndex !== -1) {
+            // Extract everything following the marker phrase
+            const command = cleanTranscript.substring(matchIndex + WAKE_PHRASE.length).trim();
+
+            if (result.isFinal) {
+              if (command.length > 0) {
+                logMessage(`<span class="ack">[ACK]</span> Yes, received command: "${command}"`);
+                // Dispatch 'command' payload to backend server / websocket API here
+              } else {
+                logMessage(`<span class="ack">[ACK]</span> Wake phrase recognized, but no command followed.`);
+              }
+            }
+          }
+        }
+      };
+
+      recognition.onend = () => {
+        // Auto-restart to maintain continuous background listening mode
+        if (isListening) {
+          try {
+            recognition.start();
+          } catch (e) {
+            console.error(e);
+          }
+        } else {
+          statusEl.textContent = "Status: Stopped";
+        }
+      };
+
+      recognition.onerror = (event) => {
+        logMessage(`[Error]: ${event.error}`);
+      };
+
+      startBtn.onclick = () => {
+        isListening = true;
+        recognition.start();
+        statusEl.textContent = "Status: Listening for wake phrase...";
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+      };
+
+      stopBtn.onclick = () => {
+        isListening = false;
+        recognition.stop();
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      };
+    }
+  </script>
+</body>
+</html>
