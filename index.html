@@ -3,18 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Wake-Word Command Listener</title>
+  <title>Wake-Word & Live Speech Listener</title>
   <style>
     body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: auto; line-height: 1.5; }
     button { padding: 10px 16px; font-size: 1rem; margin-right: 8px; cursor: pointer; }
     #status { font-weight: bold; margin: 15px 0; color: #333; }
-    #log { background: #f4f4f4; border: 1px solid #ccc; padding: 12px; height: 260px; overflow-y: auto; font-family: monospace; border-radius: 4px; }
+    #log { background: #f4f4f4; border: 1px solid #ccc; padding: 12px; height: 320px; overflow-y: auto; font-family: monospace; border-radius: 4px; }
+    .heard { color: #555; }
+    .interim { color: #888; font-style: italic; }
     .ack { color: #007a00; font-weight: bold; }
   </style>
 </head>
 <body>
 
-  <h2>Browser Speech Listener</h2>
+  <h2>Live Speech & Command Listener</h2>
   <button id="startBtn">Start Listening</button>
   <button id="stopBtn" disabled>Stop</button>
 
@@ -22,7 +24,6 @@
   <div id="log"></div>
 
   <script>
-    // Define target wake phrase in lowercase
     const WAKE_PHRASE = "computer it's for you";
 
     const startBtn = document.getElementById('startBtn');
@@ -37,10 +38,11 @@
     } else {
       const recognition = new SpeechRecognition();
       recognition.continuous = true;
-      recognition.interimResults = true;
+      recognition.interimResults = true; // Enables live/real-time printing before phrase completes
       recognition.lang = 'en-US';
 
       let isListening = false;
+      let interimEl = null;
 
       function logMessage(msg) {
         const entry = document.createElement('div');
@@ -49,34 +51,58 @@
         logEl.scrollTop = logEl.scrollHeight;
       }
 
+      function updateInterim(msg) {
+        if (!interimEl) {
+          interimEl = document.createElement('div');
+          interimEl.className = 'interim';
+          logEl.appendChild(interimEl);
+        }
+        interimEl.textContent = `[Hearing...]: ${msg}`;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function clearInterim() {
+        if (interimEl) {
+          interimEl.remove();
+          interimEl = null;
+        }
+      }
+
       recognition.onresult = (event) => {
+        let currentInterim = '';
+
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const result = event.results[i];
-          
-          // Case-insensitive normalization & basic punctuation stripping
-          const rawTranscript = result.transcript.toLowerCase();
-          const cleanTranscript = rawTranscript.replace(/['’]/g, "'").replace(/[^a-z0-9'\s]/g, "");
+          const rawTranscript = result.transcript.trim();
 
-          const matchIndex = cleanTranscript.indexOf(WAKE_PHRASE);
+          if (result.isFinal) {
+            clearInterim();
 
-          if (matchIndex !== -1) {
-            // Extract everything following the marker phrase
-            const command = cleanTranscript.substring(matchIndex + WAKE_PHRASE.length).trim();
+            // 1. Print everything heard
+            logMessage(`<span class="heard">[Heard]:</span> "${rawTranscript}"`);
 
-            if (result.isFinal) {
+            // 2. Normalize and check for wake phrase
+            const cleanTranscript = rawTranscript.toLowerCase().replace(/['’]/g, "'").replace(/[^a-z0-9'\s]/g, "");
+            const matchIndex = cleanTranscript.indexOf(WAKE_PHRASE);
+
+            if (matchIndex !== -1) {
+              const command = cleanTranscript.substring(matchIndex + WAKE_PHRASE.length).trim();
               if (command.length > 0) {
                 logMessage(`<span class="ack">[ACK]</span> Yes, received command: "${command}"`);
-                // Dispatch 'command' payload to backend server / websocket API here
               } else {
                 logMessage(`<span class="ack">[ACK]</span> Wake phrase recognized, but no command followed.`);
               }
             }
+          } else {
+            // Live stream transcript as user is actively speaking
+            currentInterim += rawTranscript;
+            updateInterim(currentInterim);
           }
         }
       };
 
       recognition.onend = () => {
-        // Auto-restart to maintain continuous background listening mode
+        clearInterim();
         if (isListening) {
           try {
             recognition.start();
@@ -95,7 +121,7 @@
       startBtn.onclick = () => {
         isListening = true;
         recognition.start();
-        statusEl.textContent = "Status: Listening for wake phrase...";
+        statusEl.textContent = "Status: Listening...";
         startBtn.disabled = true;
         stopBtn.disabled = false;
       };
